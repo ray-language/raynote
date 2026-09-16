@@ -1,0 +1,62 @@
+// The document model of RayNote: pure functions, tested in tests/doc_test.ray.
+
+pub const APP_NAME: string = "RayNote";
+
+/// The open document: its path (None = untitled), its text and whether it has
+/// unsaved changes.
+pub struct Doc {
+    path: Option<string>,
+    text: string,
+    dirty: bool,
+}
+
+pub fn untitled() -> Doc {
+    Doc { path: Option.None, text: "", dirty: false }
+}
+
+/// The file name of a path, on any separator ("/a/b/c.txt" -> "c.txt").
+pub fn file_name(path: string) -> string {
+    let parts = path.replace("\\", "/").split("/");
+    if (parts.len() == 0) { path } else { parts[parts.len() - 1] }
+}
+
+/// Whether the document is backed by a file on disk.
+pub fn has_path(d: Doc) -> bool {
+    match (d.path) {
+        Option.Some(_) => true,
+        Option.None => false,
+    }
+}
+
+/// What the document is called in the title bar.
+pub fn display_name(d: Doc) -> string {
+    match (d.path) {
+        Option.Some(p) => file_name(p),
+        Option.None => "Untitled",
+    }
+}
+
+/// The window title: "name — RayNote", with a bullet while there are unsaved
+/// changes (macOS shows the dot in the close button too; Linux and Windows only
+/// have the title).
+pub fn window_title(d: Doc) -> string {
+    let marker = if (d.dirty) { " •" } else { "" };
+    display_name(d) + marker + " — " + APP_NAME
+}
+
+/// Splits an IPC message "cmd:payload" into its command and payload (the payload
+/// may itself contain colons).
+pub fn split_message(tag: string) -> (string, string) {
+    match (tag.index_of(":")) {
+        Option.Some(i) => (tag.substring(0, i), tag.substring(i + 1, tag.len())),
+        Option.None => (tag, ""),
+    }
+}
+
+/// The name suggested by "Save As": the current file name, or untitled.txt.
+pub fn suggested_name(d: Doc) -> string {
+    match (d.path) {
+        Option.Some(p) => file_name(p),
+        Option.None => "untitled.txt",
+    }
+}

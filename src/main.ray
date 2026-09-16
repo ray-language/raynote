@@ -1,0 +1,357 @@
+// RayNote — a plain-text notepad that exercises the native-window features of
+// std/ui added in raylang 1.23 (M255–M259):
+//
+//   - M255  standard edit roles (`role:undo`, `role:paste`, …) and `ui.edit_menu`
+//   - M257  `set_title`, `set_edited`, `intercept_close` / `intercept_quit`
+//   - M258  `ui.message` / `alert` / `confirm` and file dialogs with options
+//           (filters, initial folder, suggested name, multiple selection)
+//   - M259  `ui.popup_menu` — the right-click menu of the editor
+//
+// Architecture: one native window (system webview) loads assets/index.html over the
+// ray://app scheme; the page sends `edit:<text>` on every change and `ctx` on
+// right-click through the IPC bridge, and pulls the document text with
+// `window.ray.request("get")` when the backend asks it to (`window.rayPull()`), so no
+// text ever needs JS escaping on the raylang side.
+
+import std/ui;
+import std/fs;
+import std/time;
+import doc;
+
+const WIN_W: int = 820;
+
+const WIN_H: int = 600;
+
+// Program-level state, owned by the event loop (one fiber).
+struct App {
+    win: int,
+    doc: doc.Doc,
+}
+
+// --- menus ------------------------------------------------------------------------
+
+fn install_menus() {
+    let _a = ui.set_about(
+        doc.APP_NAME,
+        "0.1.0",
+        "A notepad that exercises std/ui 1.23",
+        "© 2026 Rayala · raylang"
+    );
+    let _m = ui.app_menu(doc.APP_NAME, [ui.item("role:about", "About " + doc.APP_NAME, "")]);
+    // File goes BEFORE the standard Edit on macOS (position 0).
+    let _f = ui.menu_at(
+        0,
+        "File",
+        [
+            ui.item("new", "New", "cmd+n"),
+            ui.item("open", "Open...", "cmd+o"),
+            ui.item("open_many", "Open Several...", "cmd+shift+o"),
+            ui.separator(),
+            ui.item("save", "Save", "cmd+s"),
+            ui.item("save_as", "Save As...", "cmd+shift+s"),
+            ui.separator(),
+            ui.item("role:close", "", "")
+        ]
+    );
+    // M255: the Edit menu rebuilt — the system roles keep undo/clipboard native, our
+    // own items sit among them.
+    let _e = ui.edit_menu(
+        [
+            ui.item("role:undo", "", ""),
+            ui.item("role:redo", "", ""),
+            ui.separator(),
+            ui.item("role:cut", "", ""),
+            ui.item("role:copy", "", ""),
+            ui.item("role:paste", "", ""),
+            ui.item("role:select_all", "", ""),
+            ui.separator(),
+            ui.item("upper", "Uppercase Selection", "cmd+u"),
+            ui.item("insert_date", "Insert Date", "cmd+d"),
+            ui.separator(),
+            ui.item("stats", "Document Statistics...", "cmd+i")
+        ]
+    );
+}
+
+// --- document helpers -------------------------------------------------------------
+
+fn refresh(app: App) {
+    let _t = ui.set_title(app.win, doc.window_title(app.doc));
+    let _e = ui.set_edited(app.win, app.doc.dirty);
+    let _s = ui.set_menu_item("save", app.doc.dirty || !doc.has_path(app.doc), false);
+}
+
+// Sends the current text to the page (the page pulls it back with a request).
+fn push_text(app: App) {
+    let _j = ui.eval_js(app.win, "window.rayPull && window.rayPull()");
+}
+
+fn file_options(title: string) -> ui.FileDialogOptions {
+    var o = ui.file_options();
+    o.title = title;
+    o.filters = [
+        ui.filter("Text files", ["txt", "md"]),
+        ui.filter("Ray sources", ["ray", "toml"]),
+        ui.filter("All files", ["*"])
+    ];
+    o
+}
+
+fn load_path(app: App, path: string) -> App {
+    match (fs.read_file(path)) {
+        Result.Ok(text) => {
+            var a = app;
+            a.doc = doc.Doc { path: Option.Some(path), text: text, dirty: false };
+            refresh(a);
+            push_text(a);
+            a
+        },
+        Result.Err(e) => {
+            let _m = ui.message_styled("Could not open file", e, "error", ["OK"]);
+            app
+        },
+    }
+}
+
+// Saves to the document's path, or asks for one. Returns the app and whether the
+// document is now clean on disk (false = the user cancelled or the write failed).
+fn save(app: App, force_ask: bool) -> (App, bool) {
+    var a = app;
+    let target: Option<string> = if (force_ask || !doc.has_path(a.doc)) {
+        var o = file_options("Save note as");
+        o.suggested = doc.suggested_name(a.doc);
+        match (ui.save_file_with(o)) {
+            Result.Ok(p) => p,
+            Result.Err(e) => {
+                let _m = ui.alert("Dialog error", e);
+                Option.None
+            },
+        }
+    } else {
+        a.doc.path
+    };
+    match (target) {
+        Option.None => (a, false),
+        Option.Some(path) => match (fs.write_file(path, a.doc.text)) {
+            Result.Ok(_) => {
+                a.doc.path = Option.Some(path);
+                a.doc.dirty = false;
+                refresh(a);
+                (a, true)
+            },
+            Result.Err(e) => {
+                let _m = ui.message_styled("Could not save", e, "error", ["OK"]);
+                (a, false)
+            },
+        },
+    }
+}
+
+// The "Save changes?" question. Returns (app, may_discard): true when the document is
+// clean or the user chose to save (and it worked) or to discard.
+fn confirm_discard(app: App, what: string) -> (App, bool) {
+    if (!app.doc.dirty) {
+        return (app, true);
+    }
+    let text = "Your changes to "
+        + doc.display_name(app.doc)
+        + " will be lost if you "
+        + what
+        + " without saving.";
+    match (ui.message("Save changes?", text, ["Save", "Don't Save", "Cancel"])) {
+        Result.Ok(i) => if (i == 0) {
+            save(app, false)
+        } else if (i == 1) {
+            (app, true)
+        } else {
+            (app, false)
+        },
+        Result.Err(e) => {
+            let _m = ui.alert("Dialog error", e);
+            (app, false)
+        },
+    }
+}
+
+fn stats(app: App) {
+    let words = app.doc.text.split(" ").len();
+    let lines = app.doc.text.split("\n").len();
+    let _m = ui.alert(
+        "Document statistics",
+        doc.display_name(app.doc)
+            + ": "
+            + to_string(app.doc.text.len())
+            + " characters, ~"
+            + to_string(words)
+            + " words, "
+            + to_string(lines)
+            + " lines."
+    );
+}
+
+// --- event handlers -----------------------------------------------------------------
+
+fn on_menu(app: App, tag: string) -> (App, bool) {
+    var a = app;
+    if (tag == "new") {
+        let (a2, ok) = confirm_discard(a, "start a new note");
+        a = a2;
+        if (ok) {
+            a.doc = doc.untitled();
+            refresh(a);
+            push_text(a);
+        }
+    } else if (tag == "open") {
+        let (a2, ok) = confirm_discard(a, "open another file");
+        a = a2;
+        if (ok) {
+            match (ui.pick_file_with(file_options("Open a note"))) {
+                Result.Ok(p) => match (p) {
+                    Option.Some(path) => {
+                        a = load_path(a, path);
+                    },
+                    Option.None => { },
+                },
+                Result.Err(e) => {
+                    let _m = ui.alert("Dialog error", e);
+                },
+            }
+        }
+    } else if (tag == "open_many") {
+        // M258: multiple selection — RayNote is single-document, so it reports the
+        // choice and opens the first one.
+        var o = file_options("Choose several notes");
+        o.multiple = true;
+        match (ui.pick_files(o)) {
+            Result.Ok(paths) => {
+                if (paths.len() > 0) {
+                    var names: [string] = [];
+                    var i = 0;
+                    while (i < paths.len()) {
+                        names.push(doc.file_name(paths[i]));
+                        i = i + 1;
+                    }
+                    let _m = ui.alert(
+                        "You picked " + to_string(paths.len()) + " file(s)",
+                        names.join("\n") + "\n\nOpening the first one."
+                    );
+                    let (a2, ok) = confirm_discard(a, "open another file");
+                    a = a2;
+                    if (ok) {
+                        a = load_path(a, paths[0]);
+                    }
+                }
+            },
+            Result.Err(e) => {
+                let _m = ui.alert("Dialog error", e);
+            },
+        }
+    } else if (tag == "save") {
+        let (a2, _ok) = save(a, false);
+        a = a2;
+    } else if (tag == "save_as") {
+        let (a2, _ok) = save(a, true);
+        a = a2;
+    } else if (tag == "upper") {
+        let _j = ui.eval_js(a.win, "window.rayUpper && window.rayUpper()");
+    } else if (tag == "insert_date") {
+        let _j = ui.eval_js(
+            a.win,
+            "window.rayInsert && window.rayInsert('" + time.date_stamp(time.now_utc()) + "')"
+        );
+    } else if (tag == "stats") {
+        stats(a);
+    }
+    (a, false)
+}
+
+fn on_message(app: App, e: ui.UiEvent) -> App {
+    var a = app;
+    match (ui.as_request(e)) {
+        // The page pulls the text: answer with it (escaped natively by reply).
+        Option.Some(req) => {
+            let _r = ui.reply(e.window, req.0, a.doc.text);
+        },
+        Option.None => {
+            let (cmd, payload) = doc.split_message(e.tag);
+            if (cmd == "edit") {
+                a.doc.text = payload;
+                if (!a.doc.dirty) {
+                    a.doc.dirty = true;
+                    refresh(a);
+                }
+            } else if (cmd == "ctx") {
+                // M259: the editor's right-click menu — roles act natively, our items
+                // come back as "menu" events.
+                let _p = ui.popup_menu(
+                    e.window,
+                    [
+                        ui.item("role:cut", "", ""),
+                        ui.item("role:copy", "", ""),
+                        ui.item("role:paste", "", ""),
+                        ui.separator(),
+                        ui.item("upper", "Uppercase Selection", ""),
+                        ui.item("insert_date", "Insert Date", ""),
+                        ui.separator(),
+                        ui.item("stats", "Document Statistics...", "")
+                    ]
+                );
+            } else if (cmd == "ready") {
+                push_text(a);
+            }
+        },
+    }
+    a
+}
+
+fn main() -> int {
+    install_menus();
+    let _m = ui.mount_embed("", "assets");
+    var o = ui.options(WIN_W, WIN_H);
+    o.min_width = 480;
+    o.min_height = 320;
+    o.autosave = "raynote-main";
+    let win = match (ui.open_with(doc.window_title(doc.untitled()), "ray://app/assets/index.html", o)) {
+        Result.Ok(h) => h,
+        Result.Err(e) => {
+            print("could not open the window: " + e);
+            return 1;
+        },
+    };
+    var app = App { win: win, doc: doc.untitled() };
+    refresh(app);
+    // M257: closing the window or quitting asks first while there are unsaved changes.
+    let _c = ui.intercept_close(win, true);
+    let _q = ui.intercept_quit(true);
+
+    while (true) {
+        let e = match (ui.next_event()) {
+            Result.Ok(ev) => ev,
+            Result.Err(err) => {
+                print("event loop: " + err);
+                return 1;
+            },
+        };
+        if (e.kind == "message") {
+            app = on_message(app, e);
+        } else if (e.kind == "menu") {
+            let (a2, _stop) = on_menu(app, e.tag);
+            app = a2;
+        } else if (e.kind == "close_requested") {
+            let (a2, ok) = confirm_discard(app, "close the window");
+            app = a2;
+            if (ok) {
+                close(win);
+            }
+        } else if (e.kind == "quit_requested") {
+            let (a2, ok) = confirm_discard(app, "quit");
+            app = a2;
+            if (ok) {
+                return 0;
+            }
+        } else if (e.kind == "closed") {
+            return 0;
+        }
+    }
+    0
+}

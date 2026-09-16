@@ -1,0 +1,55 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>RayNote</title>
+<style>
+  :root { color-scheme: light dark; }
+  html, body { height: 100%; margin: 0; }
+  body { display: flex; flex-direction: column; font: 14px/1.4 system-ui, sans-serif; background: Canvas; color: CanvasText; }
+  #editor { flex: 1; width: 100%; box-sizing: border-box; border: 0; outline: none; resize: none; padding: 14px 16px; font: 14px/1.5 ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; background: transparent; color: inherit; }
+  #status { padding: 4px 12px; font-size: 12px; opacity: .7; border-top: 1px solid color-mix(in srgb, CanvasText 15%, transparent); user-select: none; }
+</style>
+</head>
+<body>
+<textarea id="editor" spellcheck="false" placeholder="Type here. Right-click for the context menu; File and Edit menus are native."></textarea>
+<div id="status">RayNote · std/ui 1.23 demo</div>
+<script>
+  // The IPC bridge (std/ui): window.ray.send(text) → a "message" event in raylang;
+  // window.ray.request(text) → a Promise the backend resolves with ui.reply.
+  const ed = document.getElementById('editor');
+  const status = document.getElementById('status');
+  const send = (t) => window.ray && window.ray.send && window.ray.send(t);
+
+  // Every edit ships the whole text: RayNote is tiny and the bridge is native.
+  ed.addEventListener('input', () => { send('edit:' + ed.value); updateStatus(); });
+
+  // M259: the native context menu — the page only reports the right-click.
+  ed.addEventListener('contextmenu', (e) => { e.preventDefault(); send('ctx'); });
+
+  // The backend asks the page to pull the document (after open/new): request/reply.
+  window.rayPull = () => {
+    if (window.ray && window.ray.request) {
+      window.ray.request('get').then((text) => { ed.value = text; updateStatus(); ed.focus(); });
+    }
+  };
+  window.rayUpper = () => {
+    const a = ed.selectionStart, b = ed.selectionEnd;
+    if (a === b) return;
+    ed.setRangeText(ed.value.slice(a, b).toUpperCase(), a, b, 'select');
+    send('edit:' + ed.value); updateStatus();
+  };
+  window.rayInsert = (text) => {
+    ed.setRangeText(text, ed.selectionStart, ed.selectionEnd, 'end');
+    send('edit:' + ed.value); updateStatus(); ed.focus();
+  };
+  function updateStatus() {
+    const words = ed.value.trim() ? ed.value.trim().split(/\s+/).length : 0;
+    status.textContent = `${ed.value.length} chars · ${words} words · ${ed.value.split('\n').length} lines`;
+  }
+  updateStatus();
+  ed.focus();
+  send('ready');
+</script>
+</body>
+</html>

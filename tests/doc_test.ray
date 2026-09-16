@@ -1,0 +1,37 @@
+import doc;
+
+@test
+fn file_name_handles_both_separators() {
+    assert_eq(doc.file_name("/a/b/c.txt"), "c.txt");
+    assert_eq(doc.file_name("C:\\docs\\notes.md"), "notes.md");
+    assert_eq(doc.file_name("plain.ray"), "plain.ray");
+}
+
+@test
+fn window_title_marks_unsaved_changes() {
+    var d = doc.untitled();
+    assert_eq(doc.window_title(d), "Untitled — RayNote");
+    d.dirty = true;
+    assert_eq(doc.window_title(d), "Untitled • — RayNote");
+    d.path = Option.Some("/tmp/todo.txt");
+    d.dirty = false;
+    assert_eq(doc.window_title(d), "todo.txt — RayNote");
+}
+
+@test
+fn split_message_keeps_colons_in_the_payload() {
+    let (cmd, payload) = doc.split_message("edit:a: b: c");
+    assert_eq(cmd, "edit");
+    assert_eq(payload, "a: b: c");
+    let (only, empty) = doc.split_message("ctx");
+    assert_eq(only, "ctx");
+    assert_eq(empty, "");
+}
+
+@test
+fn suggested_name_defaults_to_untitled_txt() {
+    var d = doc.untitled();
+    assert_eq(doc.suggested_name(d), "untitled.txt");
+    d.path = Option.Some("/x/y/z.md");
+    assert_eq(doc.suggested_name(d), "z.md");
+}
