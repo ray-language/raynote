@@ -226,10 +226,8 @@ fn on_menu(app: App, tag: string) -> (App, bool) {
             Result.Ok(paths) => {
                 if (paths.len() > 0) {
                     var names: [string] = [];
-                    var i = 0;
-                    while (i < paths.len()) {
-                        names.push(doc.file_name(paths[i]));
-                        i = i + 1;
+                    for p in paths {
+                        names.push(doc.file_name(p));
                     }
                     let _m = ui.alert(
                         "You picked " + to_string(paths.len()) + " file(s)",
@@ -353,5 +351,4 @@ fn main() -> int {
             return 0;
         }
     }
-    0
 }
