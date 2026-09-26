@@ -27,7 +27,7 @@ puro está en `src/doc.ray` y se prueba en `tests/`.
 ## Uso
 
 ```sh
-ray run          # VM (raylang >= 1.23)
+ray run          # VM (raylang >= 1.27.13)
 ray dev          # con recarga en vivo
 ray test         # tests del modelo
 ray build --native --release   # binario nativo ./raynote

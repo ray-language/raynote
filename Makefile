@@ -2,7 +2,7 @@ RAY ?= ray
 
 .PHONY: run dev test check native smoke
 
-run:      ## run in the VM (needs raylang >= 1.23)
+run:      ## run in the VM (needs raylang >= 1.27.13)
 	@$(RAY) run
 
 dev:      ## run with live reload of assets/ and src/
